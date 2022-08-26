@@ -1,0 +1,810 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Modeling various antibiotic introduction strategies for N. gonorrhoeae 
+#E Reichert, 04.2022
+
+```{r}
+#load necessary packages
+library(tidyverse)
+library(deSolve)
+library(RColorBrewer)
+library(showtext)
+library(reshape2)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+source("~/Documents/2021 Grad lab research/GCfunctions.R")
+```
+
+I. Set parameters and initial conditions.
+
+```{r}
+# Set parameters that will stay constant throughout model
+pop = 10^6                    #pop size
+pop.p = c(0.3, 0.6, 0.1)      #relative size of each risk group; low, M, high
+c_min = 1.2165433
+activities = c(1*c_min/365, 
+               5*c_min/365, 
+               20*c_min/365)  #sexual contacts per day
+epsilon = 0.2427385           #mixing parameter
+
+#PARAM VALUES
+b = 0.4566313        #transmission Pr per partnership
+sigma = 0.6009376    #Pr of symptomatic infection
+g = 1/(168.5402978)  #natural recovery rate from infection
+Ts =1/(11.4216522)   #time to treatment for symptomatic infection
+Tm = 0.4035764/365   #screening rate (time to treatment for asymptomatic infection)
+rho = 1/(20*365)     #model entry/exit rate
+omega_a = 10^-8      #Pr of emergence of resistance on treatment with A (ceftriaxone)
+omega_b = 10^-4      #Pr of emergence of resistance on treatment with B (new drug)
+prA = 0.5            #Pr of treatment with A
+prB = 0.5            #Pr of treatment with B
+fA = 0.98            #relative fitness, resistant to A
+fB = 0.95            #relative fitness, resistant to B (is this reasonable??)
+fAB = fA*fB          #relative fitness, dual resistance
+pi_s = 0.90          #Pr of retreatment if initial treatment failure, symptomatic
+Tsr = Ts/3           #time to retreatment for symptomatic infection, if failure
+resA = 0.0001        #initial prev of resistance to A
+```
+
+```{r}
+years = 40
+tstep = 1 #in days
+  
+#set N for each sexual risk group (1 = lo risk, 2 = med risk, 3 = hi risk)
+N <- pop
+N1 <- N*pop.p[1]
+N2 <- N*pop.p[2]
+N3 <- N*pop.p[3]
+
+#distribute GC cases to have overall 2.8% prevalence
+x <- 0.03/(.3*0.029+.6*0.154+.1*0.817)
+
+gc_lo <- round(N1*x*0.029,0)
+gc_md <- round(N2*x*0.154,0)
+gc_hi <- round(N3*x*0.817,0)
+
+#estimated proportion of symp. infections at cross-sectional point in time, @ equilibrium
+prev_symp <- 0.10
+Y_gc_lo <- gc_lo*prev_symp
+Z_gc_lo <- gc_lo*(1-prev_symp)
+Y_gc_md <- gc_md*prev_symp
+Z_gc_md <- gc_md*(1-prev_symp)
+Y_gc_hi <- gc_hi*prev_symp
+Z_gc_hi <- gc_hi*(1-prev_symp)
+
+Y0 <- c(Y_gc_lo, Y_gc_md, Y_gc_hi) * (1-resA)
+Z0 <- c(Z_gc_lo, Z_gc_md, Z_gc_hi) * (1-resA)
+
+YA <- c(Y_gc_lo, Y_gc_md, Y_gc_hi) * resA
+ZA <- c(Z_gc_lo, Z_gc_md, Z_gc_hi) * resA
+
+#start with overall prevalence of 3% of gonorrhea
+inits <- c(S1 = N1-gc_lo, S2 = N2-gc_md, S3 = N3-gc_hi, 
+           Y01 = Y0[1], Y02 = Y0[2], Y03 = Y0[3],
+           Z01 = Z0[1], Z02 = Z0[2], Z03 = Z0[3], 
+           Ya1 = YA[1], Ya2 = YA[2], Ya3 = YA[3], 
+           Za1 = ZA[1], Za2 = ZA[2], Za3 = ZA[3], 
+           Yb1 = 0, Yb2 = 0, Yb3 = 0, 
+           Zb1 = 0, Zb2 = 0, Zb3 = 0, 
+           Yab1 = 0, Yab2 = 0, Yab3 = 0, 
+           Zab1 = 0, Zab2 = 0, Zab3 = 0) 
+```
+
+```{r}
+dt <- seq(0, 365*years, tstep)
+
+#list out parameters defined above
+parms <- list(g=g, 
+              pop=pop, 
+              pop.p=pop.p, 
+              epsilon=epsilon, 
+              b = b, 
+              sigma = sigma, 
+              Ts = Ts, 
+              Tm = Tm, 
+              rho = rho, 
+              prA = prA, 
+              prB = prB, 
+              omega_a = omega_a, 
+              omega_b = omega_b, 
+              fA = fA, fB = fB, 
+              fAB = fAB, 
+              pi_s = pi_s, 
+              Tsr = Tsr)
+```
+
+# \############ SCENARIO 1
+
+```{r}
+## SCENARIO 1
+# Random 50-50 probability of receiving either drug. Physicians can randomly allocate based on preference
+
+#1. Set up the ODE system of equations
+random.SI <- function(t, x, parms){
+    with(as.list(c(t, x, parms)),{
+        N = c(N1, N2, N3)
+        S = c(S1, S2, S3)
+        Y0 = c(Y01, Y02, Y03) #symptomatic infected, no resistance
+        Ya = c(Ya1, Ya2, Ya3) #resistant to A
+        Yb = c(Yb1, Yb2, Yb3) #resistant to B
+        Yab = c(Yab1, Yab2, Yab3) #dual resistance
+        Z0 = c(Z01, Z02, Z03) #asymptomatic infected, no resistance
+        Za = c(Za1, Za2, Za3) #resistant to A
+        Zb = c(Zb1, Zb2, Zb3) #resistant to B
+        Zab = c(Zab1, Zab2, Zab3) #dual resistance
+        
+        beta <- (1-epsilon)*outer(activities, activities)/sum(pop*pop.p*activities) + epsilon*activities/(pop*pop.p)*diag(3)
+        beta <- beta * b #contacts * transmission pr per partnership
+        
+        #Keep track of prevalence of resistance to A
+        prevA = (sum(Ya) + sum(Za) + sum(Yab) + sum(Zab))/(sum(Y0) + sum(Ya) + sum(Yb) + sum(Yab) + sum(Z0) + sum(Za) + sum(Zb) + sum(Zab))
+        
+        #keep track of incident infections each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        #susceptibles
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*prA - omega_b*prB)*(Ts*Y0 + Tm*Z0) +
+          prB*(1-omega_b)*(Ts*Ya + Tm*Za) +
+          prA*(1-omega_a)*(Ts*Yb + Tm*Zb) +
+          (1-prA)*(1-omega_a)*pi_s*Tsr*Yb +
+          (1-prB)*(1-omega_b)*pi_s*Tsr*Ya + 
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Ts*Y0 - 
+          prB*Ts*Ya - 
+          (1-prB)*pi_s*Tsr*Ya -
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Tm*Z0 -
+          prB*Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Ts*Y0 -
+          prA*Ts*Yb - 
+          (1-prA)*pi_s*Tsr*Yb -
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Tm*Z0 -
+          prA*Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Ts*Yb +
+          omega_b*prB*Ts*Ya +
+          omega_a*(1-prA)*pi_s*Tsr*Yb +
+          omega_b*(1-prB)*pi_s*Tsr*Ya -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Tm*Zb +
+          omega_b*prB*Tm*Za -
+          g*Zab - rho*Zab
+        
+        der <- c(dS, dY0, dZ0, dYa, dZa, dYb, dZb, dYab, dZab)
+        list(der, prevA = prevA, Inc = Inc)
+    })
+}
+```
+
+```{r}
+#run the ODE solver
+random_sim <- as.data.frame(ode(inits, dt, random.SI, parms=parms))   
+
+#ensure the total pop size does not change
+total_check <- random_sim %>% mutate(RowSum=rowSums(.[setdiff(names(.),c("time", "prevA", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#cumulative no. of incident infections
+random_sim <- random_sim %>%
+  mutate(CumCases = cumsum(Inc))
+
+max(random_sim$CumCases)
+```
+
+
+```{r}
+#II. Data tidying
+random_sim <- random_sim %>% select(-prevA, -Inc, -CumCases)
+random_sim_long <- SI.clean(random_sim)
+```
+
+```{r}
+#III. Visualize results
+SI.visualize(random_sim_long)
+```
+
+```{r}
+SI.outputs(random_sim, random_sim_long)
+```
+
+# \############ MONOTHERAPY, DRUG A
+
+```{r}
+## Monotherapy with Drug A Strategy, for comparison
+parms$prA <- 1          #Pr of treatment with A
+parms$prB <- 0          #Pr of treatment with B
+
+#run the ODE solver
+monotherapy_sim_A <- as.data.frame(ode(inits, dt, random.SI, parms=parms))   
+
+#time which 5% resistance threshold met for drug A -- we will use for reserve strategy
+Q <- min(monotherapy_sim_A$time[monotherapy_sim_A$prevA >= 0.05])
+
+#ensure the total pop size does not change
+total_check <- monotherapy_sim_A %>% mutate(RowSum=rowSums(.[setdiff(names(.), c("time", "prevA", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#cumulative no. of incident infections
+monotherapy_sim_A <- monotherapy_sim_A %>%
+  mutate(CumCases = cumsum(Inc))
+
+max(monotherapy_sim_A$CumCases)
+```
+
+```{r}
+#II. Data tidying
+monotherapy_sim_A <- monotherapy_sim_A %>% select(-prevA, -Inc, -CumCases)
+monotherapy_sim_long_A <- SI.clean(monotherapy_sim_A)
+```
+
+```{r}
+#III. Visualize results
+SI.visualize(monotherapy_sim_long_A)
+```
+
+```{r}
+SI.outputs(monotherapy_sim_A, monotherapy_sim_long_A)
+```
+
+# \############ SCENARIO 2
+
+```{r}
+## SCENARIO 2
+#Combination therapy, everyone gets both drugs
+
+#I. Set up ODE system of equations
+combo.SI <- function(t, x, parms){
+    with(as.list(c(t, x, parms)),{
+        N = c(N1, N2, N3)
+        S = c(S1, S2, S3)
+        Y0 = c(Y01, Y02, Y03) #symptomatic infected, no resistance
+        Ya = c(Ya1, Ya2, Ya3) #resistant to A
+        Yb = c(Yb1, Yb2, Yb3) #resistant to B
+        Yab = c(Yab1, Yab2, Yab3) #dual resistance
+        Z0 = c(Z01, Z02, Z03) #asymptomatic infected, no resistance
+        Za = c(Za1, Za2, Za3) #resistant to A
+        Zb = c(Zb1, Zb2, Zb3) #resistant to B
+        Zab = c(Zab1, Zab2, Zab3) #dual resistance
+        
+        beta <- (1-epsilon)*outer(activities, activities)/sum(pop*pop.p*activities) + epsilon*activities/(pop*pop.p)*diag(3)
+        beta <- beta * b #contacts * transmission pr per partnership
+        
+        #Keep track of incident infections each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        #susceptibles
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*omega_b)*(Ts*Y0 + Tm*Z0) +
+          (1-omega_b)*(Ts*Ya + Tm*Za) +
+          (1-omega_a)*(Ts*Yb + Tm*Zb) +
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) - 
+          Ts*Ya - 
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) -
+          Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) -
+          Ts*Yb - 
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) -
+          Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*Ts*Yb +
+          omega_b*Ts*Ya +
+          omega_a*omega_b*Ts*Y0 -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*Tm*Zb +
+          omega_b*Tm*Za +
+          omega_a*omega_b*Tm*Z0 -
+          g*Zab - rho*Zab
+        
+        der <- c(dS, dY0, dZ0, dYa, dZa, dYb, dZb, dYab, dZab)
+        list(der, Inc = Inc)
+    })
+}
+```
+
+```{r}
+#run the ODE solver
+combo_sim <- as.data.frame(ode(inits, dt, combo.SI, parms=parms))   
+
+#ensure total pop size does not change
+total_check <- combo_sim %>% mutate(RowSum=rowSums(.[setdiff(names(.), c("time", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#cumulative no. of incident infections
+combo_sim <- combo_sim %>%
+  mutate(CumCases = cumsum(Inc))
+
+max(combo_sim$CumCases)
+```
+
+
+```{r}
+#II. Data tidying
+combo_sim <- combo_sim %>% select(-Inc, -CumCases)
+
+combo_sim_long <- SI.clean(combo_sim)
+```
+
+```{r}
+#III. Visualize results
+SI.visualize(combo_sim_long)
+```
+
+```{r}
+SI.outputs(combo_sim, combo_sim_long)
+```
+
+# \############ SCENARIO 3
+
+```{r}
+## SCENARIO 3
+#"Reserve" strategy, everyone gets drug A until it reaches 5% resistance, then switch to drug B
+
+library(sigmoid)
+
+# Function will transition between 0 and 1 when h and Q are approximately equal
+smooth.transition1_new <- function(t, Q, tune = 0.02){
+  sigmoid((t/Q -1)/tune)
+}
+smooth.transition2_new <- function(t, Q, tune = 0.02){
+  1-sigmoid((t/Q - 1)/tune)
+        }
+        
+#I. Set up ODE system of equations
+reserve.SI <- function(t, x, parms){
+    with(as.list(c(t, x, parms)),{
+        N = c(N1, N2, N3)
+        S = c(S1, S2, S3)
+        Y0 = c(Y01, Y02, Y03) #symptomatic infected, no resistance
+        Ya = c(Ya1, Ya2, Ya3) #resistant to A
+        Yb = c(Yb1, Yb2, Yb3) #resistant to B
+        Yab = c(Yab1, Yab2, Yab3) #dual resistance
+        Z0 = c(Z01, Z02, Z03) #asymptomatic infected, no resistance
+        Za = c(Za1, Za2, Za3) #resistant to A
+        Zb = c(Zb1, Zb2, Zb3) #resistant to B
+        Zab = c(Zab1, Zab2, Zab3) #dual resistance
+        
+        beta <- (1-epsilon)*outer(activities, activities)/sum(pop*pop.p*activities) + epsilon*activities/(pop*pop.p)*diag(3)
+        beta <- beta * b #contacts * transmission pr per partnership
+        
+        #keep track of prevalence of resistance to drug A
+        prevA = (sum(Ya) + sum(Za) + sum(Yab) + sum(Zab))/(sum(Y0) + sum(Ya) + sum(Yb) + sum(Yab) + sum(Z0) + sum(Za) + sum(Zb) + sum(Zab))
+        
+        #keep track of incident infections each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        #Q = time of 5% resistance threshold for Drug A
+        Q <- Q+182.5
+        prA <- smooth.transition2_new(t, Q)
+        prB <- smooth.transition1_new(t, Q)
+
+        #susceptibles
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*prA - omega_b*prB)*(Ts*Y0 + Tm*Z0) +
+          prB*(1-omega_b)*(Ts*Ya + Tm*Za) +
+          prA*(1-omega_a)*(Ts*Yb + Tm*Zb) +
+          (1-prA)*(1-omega_a)*pi_s*Tsr*Yb +
+          (1-prB)*(1-omega_b)*pi_s*Tsr*Ya + 
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Ts*Y0 - 
+          prB*Ts*Ya - 
+          (1-prB)*pi_s*Tsr*Ya -
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Tm*Z0 -
+          prB*Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Ts*Y0 -
+          prA*Ts*Yb - 
+          (1-prA)*pi_s*Tsr*Yb -
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Tm*Z0 -
+          prA*Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Ts*Yb +
+          omega_b*prB*Ts*Ya +
+          omega_a*(1-prA)*pi_s*Tsr*Yb +
+          omega_b*(1-prB)*pi_s*Tsr*Ya -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Tm*Zb +
+          omega_b*prB*Tm*Za -
+          g*Zab - rho*Zab
+        
+        der <- c(dS, dY0, dZ0, dYa, dZa, dYb, dZb, dYab, dZab)
+        list(der, prevA = prevA, prA = prA, prB = prB, Inc = Inc)
+    })
+}
+```
+
+```{r}
+#run ODE solver
+reserve_sim <- as.data.frame(ode(inits, dt, reserve.SI, parms=parms))   
+
+min(reserve_sim[reserve_sim$prevA >= 0.05, "time"])
+
+total_check <- reserve_sim %>% mutate(RowSum=rowSums(.[setdiff(names(.),c("time", "prevA", "prA", "prB", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#visualize switch in prA and prB parameters
+ggplot(data = reserve_sim) +
+  geom_line(aes(x = time, y = prA), col = "midnightblue", size = 1.5) +
+  geom_line(aes(x = time, y = prB), col = "deeppink", size = 1.5) +
+  geom_vline(xintercept = Q) +
+  geom_line(aes(x = time, y = prevA), col = "orange", linetype = "dashed") +
+  ylab("Pr of Receiving Drug")
+```
+
+```{r}
+#cumulative no. of incident infections
+reserve_sim <- reserve_sim %>%
+  mutate(CumCases = cumsum(Inc))
+
+max(reserve_sim$CumCases)
+```
+
+
+```{r}
+#II. Data tidying
+reserve_sim <- reserve_sim %>%
+  select(-prevA, -prB, -prA, -Inc, -CumCases)
+reserve_sim_long <- SI.clean(reserve_sim)
+```
+
+```{r}
+#III. Visualize output
+SI.visualize(reserve_sim_long)
+```
+
+```{r}
+SI.outputs(reserve_sim, reserve_sim_long)
+```
+
+# \############ SCENARIO 4
+
+```{r}
+## SCENARIO 4
+#Gradual Switch strategy, drug B phased in from 0 to 0.5 probability of use
+
+#I. Set up ODE system of equations
+gradual.SI <- function(t, x, parms){
+    with(as.list(c(t, x, parms)),{
+        N = c(N1, N2, N3)
+        S = c(S1, S2, S3)
+        Y0 = c(Y01, Y02, Y03) #symptomatic infected, no resistance
+        Ya = c(Ya1, Ya2, Ya3) #resistant to A
+        Yb = c(Yb1, Yb2, Yb3) #resistant to B
+        Yab = c(Yab1, Yab2, Yab3) #dual resistance
+        Z0 = c(Z01, Z02, Z03) #asymptomatic infected, no resistance
+        Za = c(Za1, Za2, Za3) #resistant to A
+        Zb = c(Zb1, Zb2, Zb3) #resistant to B
+        Zab = c(Zab1, Zab2, Zab3) #dual resistance
+        
+        beta <- (1-epsilon)*outer(activities, activities)/sum(pop*pop.p*activities) + epsilon*activities/(pop*pop.p)*diag(3)
+        beta <- beta * b #contacts * transmission pr per partnership
+        
+        # Function will transition between 0 and 0.5 when h and Q are approximately equal
+        smooth.transition3 <- function(t, Q, tune = 0.3){
+  sigmoid((t/Q -1)/tune)/2
+}
+        smooth.transition4 <- function(t, Q, tune = 0.3){
+  1-sigmoid((t/Q - 1)/tune)/2
+}
+        Q <- 365*4 #can play around and make this midpoint shorter/longer
+        prA <- smooth.transition4(t, Q)
+        prB <- smooth.transition3(t, Q)
+        
+        #keep track of incident infections each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        #susceptibles
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*prA - omega_b*prB)*(Ts*Y0 + Tm*Z0) +
+          prB*(1-omega_b)*(Ts*Ya + Tm*Za) +
+          prA*(1-omega_a)*(Ts*Yb + Tm*Zb) +
+          (1-prA)*(1-omega_a)*pi_s*Tsr*Yb +
+          (1-prB)*(1-omega_b)*pi_s*Tsr*Ya + 
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Ts*Y0 - 
+          prB*Ts*Ya - 
+          (1-prB)*pi_s*Tsr*Ya -
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Tm*Z0 -
+          prB*Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Ts*Y0 -
+          prA*Ts*Yb - 
+          (1-prA)*pi_s*Tsr*Yb -
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Tm*Z0 -
+          prA*Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Ts*Yb +
+          omega_b*prB*Ts*Ya +
+          omega_a*(1-prA)*pi_s*Tsr*Yb +
+          omega_b*(1-prB)*pi_s*Tsr*Ya -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Tm*Zb +
+          omega_b*prB*Tm*Za -
+          g*Zab - rho*Zab
+        
+        der <- c(dS, dY0, dZ0, dYa, dZa, dYb, dZb, dYab, dZab)
+        list(der, Inc = Inc)
+    })
+}
+```
+
+```{r}
+#run ODE solver
+gradual_sim <- as.data.frame(ode(inits, dt, gradual.SI, parms=parms))   
+
+total_check <- gradual_sim %>% mutate(RowSum=rowSums(.[setdiff(names(.), c("time", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#cumulative no. of incident infections
+gradual_sim <- gradual_sim %>%
+  mutate(CumCases = cumsum(Inc))
+
+max(gradual_sim$CumCases)
+```
+
+
+```{r}
+#II. Data tidying
+gradual_sim <- gradual_sim %>% 
+  select(-Inc, -CumCases)
+gradual_sim_long <- SI.clean(gradual_sim)
+```
+
+```{r}
+#III. Visualize output
+SI.visualize(gradual_sim_long)
+```
+
+```{r}
+SI.outputs(gradual_sim, gradual_sim_long)
+```
+
+# \############ SCENARIO 3, FOLLOWED BY 2
+
+```{r}
+#For comparison, look at what happens if you first use the Reserve Strategy
+#Then, once drug B is lost, you enact combination therapy
+
+# Function will transition between 0 and 1 when h and Q are approximately equal
+smooth.transition1_new <- function(t, Q, tune = 0.02){
+  sigmoid((t/Q -1)/tune)
+}
+smooth.transition2_new <- function(t, Q, tune = 0.02){
+  1-sigmoid((t/Q - 1)/tune)
+        }
+        
+#I. Set up ODE system of equations
+reserve_combo.SI <- function(t, x, parms){
+    with(as.list(c(t, x, parms)),{
+        N = c(N1, N2, N3)
+        S = c(S1, S2, S3)
+        Y0 = c(Y01, Y02, Y03) #symptomatic infected, no resistance
+        Ya = c(Ya1, Ya2, Ya3) #resistant to A
+        Yb = c(Yb1, Yb2, Yb3) #resistant to B
+        Yab = c(Yab1, Yab2, Yab3) #dual resistance
+        Z0 = c(Z01, Z02, Z03) #asymptomatic infected, no resistance
+        Za = c(Za1, Za2, Za3) #resistant to A
+        Zb = c(Zb1, Zb2, Zb3) #resistant to B
+        Zab = c(Zab1, Zab2, Zab3) #dual resistance
+        
+        beta <- (1-epsilon)*outer(activities, activities)/sum(pop*pop.p*activities) + epsilon*activities/(pop*pop.p)*diag(3)
+        beta <- beta * b #contacts * transmission pr per partnership
+        
+        #keep track of prevalence of resistance to drug B
+        prevB = (sum(Yb) + sum(Zb) + sum(Yab) + sum(Zab))/(sum(Y0) + sum(Ya) + sum(Yb) + sum(Yab) + sum(Z0) + sum(Za) + sum(Zb) + sum(Zab))
+        
+        if (prevB <= 0.05) {
+        Q <- Q+182.5
+        prA <- smooth.transition2_new(t, Q)
+        prB <- smooth.transition1_new(t, Q)
+        
+        #keep track of incident infecitons each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        #susceptibles
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*prA - omega_b*prB)*(Ts*Y0 + Tm*Z0) +
+          prB*(1-omega_b)*(Ts*Ya + Tm*Za) +
+          prA*(1-omega_a)*(Ts*Yb + Tm*Zb) +
+          (1-prA)*(1-omega_a)*pi_s*Tsr*Yb +
+          (1-prB)*(1-omega_b)*pi_s*Tsr*Ya + 
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Ts*Y0 - 
+          prB*Ts*Ya - 
+          (1-prB)*pi_s*Tsr*Ya -
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) +
+          omega_a*prA*Tm*Z0 -
+          prB*Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Ts*Y0 -
+          prA*Ts*Yb - 
+          (1-prA)*pi_s*Tsr*Yb -
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) +
+          omega_b*prB*Tm*Z0 -
+          prA*Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Ts*Yb +
+          omega_b*prB*Ts*Ya +
+          omega_a*(1-prA)*pi_s*Tsr*Yb +
+          omega_b*(1-prB)*pi_s*Tsr*Ya -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*prA*Tm*Zb +
+          omega_b*prB*Tm*Za -
+          g*Zab - rho*Zab
+        }
+        else {
+          #COMBINATION THERAPY
+          #susceptibles
+          prA = 1
+          prB = 1
+          
+        #keep track of incident infections each day
+        Inc = sum(beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S)
+
+        dS <- -beta %*% ((Y0 + Z0) + fA*(Ya+Za) + fB*(Yb+Zb) + fAB*(Yab+Zab)) *S + 
+          (1-omega_a*omega_b)*(Ts*Y0 + Tm*Z0) +
+          (1-omega_b)*(Ts*Ya + Tm*Za) +
+          (1-omega_a)*(Ts*Yb + Tm*Zb) +
+          pi_s*Tsr*Yab +
+          g*(Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) + 
+          rho*(S + Y0 + Ya + Yb + Yab + Z0 + Za + Zb + Zab) - rho*S
+        #infections w/ no resistance
+        dY0 <- sigma*(beta %*% (Y0+Z0)*S) - Ts*Y0 - g*Y0 - rho*Y0
+        dZ0 <- (1-sigma)*(beta %*% (Y0+Z0)*S) - Tm*Z0 - g*Z0 - rho*Z0
+        #infections w/ resistance to A
+        dYa <- sigma*fA*(beta %*% (Ya+Za)*S) - 
+          Ts*Ya - 
+          g*Ya - rho*Ya
+        dZa <- (1-sigma)*fA*(beta %*% (Ya+Za)*S) -
+          Tm*Za - g*Za - rho*Za
+        #infections w/ resistance to B
+        dYb <- sigma*fB*(beta %*% (Yb+Zb)*S) -
+          Ts*Yb - 
+          g*Yb - rho*Yb
+        dZb <- (1-sigma)*fB*(beta %*% (Yb+Zb)*S) -
+          Tm*Zb - g*Zb - rho*Zb
+        #infections w/ resistance to both
+        dYab <- sigma*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*Ts*Yb +
+          omega_b*Ts*Ya +
+          omega_a*omega_b*Ts*Y0 -
+          pi_s*Tsr*Yab -
+          g*Yab - rho*Yab
+        dZab <- (1-sigma)*fAB*(beta %*% (Yab+Zab)*S) +
+          omega_a*Tm*Zb +
+          omega_b*Tm*Za +
+          omega_a*omega_b*Tm*Z0 -
+          g*Zab - rho*Zab
+        }
+        
+        der <- c(dS, dY0, dZ0, dYa, dZa, dYb, dZb, dYab, dZab)
+        list(der, prevB = prevB, prA = prA, prB = prB, Inc = Inc)
+    })
+}
+```
+
+```{r}
+#run ODE solver
+reserve_combo_sim <- as.data.frame(ode(inits, dt, reserve_combo.SI, parms=parms, method = "ode45"))   
+
+min(reserve_combo_sim[reserve_combo_sim$prevB >= 0.05, "time"])
+
+total_check <- reserve_combo_sim %>% mutate(RowSum=rowSums(.[setdiff(names(.), c("time", "prevB", "prA", "prB", "Inc"))])) %>% select(RowSum)
+```
+
+```{r}
+#visualize switch in prA and prB parameters
+ggplot(data = reserve_combo_sim) +
+  geom_point(aes(x = time, y = prA), col = "midnightblue", size = 1.5) +
+  geom_point(aes(x = time, y = prB), col = "deeppink", size = 1.5) +
+  geom_vline(xintercept = Q) +
+  geom_line(aes(x = time, y = prevB), col = "orange", linetype = "dashed") +
+  ylab("Pr of Receiving Drug")
+```
+
+```{r}
+#cumulative no. of incident infections
+reserve_combo_sim <- reserve_combo_sim %>%
+  mutate(CumCases = cumsum(Inc))
+max(reserve_combo_sim$CumCases)
+```
+
+
+```{r}
+#II. Data tidying
+reserve_combo_sim <- reserve_combo_sim %>%
+  select(-prevB, -prB, -prA, -Inc, -CumCases)
+reserve_combo_sim_long <- SI.clean(reserve_combo_sim)
+```
+
+```{r}
+#III. Visualize output
+SI.visualize(reserve_combo_sim_long)
+```
+```{r}
+SI.outputs(reserve_combo_sim, reserve_combo_sim_long)
+```
+
