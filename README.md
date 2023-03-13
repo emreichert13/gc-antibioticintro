@@ -4,6 +4,8 @@ Authors: Reichert E, Yaesoubi R, Rönn MM, Gift TL, Salomon JA, Grad YH
 
 Correspondence: ereichert@hsph.harvard.edu
 
+Preprint: https://www.medrxiv.org/content/10.1101/2023.02.14.23285710v1
+
 **Use Instructions:**
 
 The three core files used to define the mathematical models and generate output are GCfunctions.R, calibration_ER.R, and GCtransmission.Rmd. 
