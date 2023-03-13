@@ -25,7 +25,8 @@ source("~/Documents/2021 Grad lab research/GCfunctions.R")
 I. Set parameters and initial conditions.
 
 ```{r}
-# Set parameters that will stay constant throughout model
+# Set parameters using estimates from both prior literature and MLE fitting (calibration_ER script)
+
 pop = 10^6                    #pop size
 pop.p = c(0.3, 0.6, 0.1)      #relative size of each risk group; low, M, high
 c_min = 1.2165433
@@ -50,7 +51,7 @@ fB = 0.95            #relative fitness, resistant to B (is this reasonable??)
 fAB = fA*fB          #relative fitness, dual resistance
 pi_s = 0.90          #Pr of retreatment if initial treatment failure, symptomatic
 Tsr = Ts/3           #time to retreatment for symptomatic infection, if failure
-resA = 0.0001        #initial prev of resistance to A
+resA = 0.0001        #initial prev of resistance to A 
 ```
 
 ```{r}
@@ -63,7 +64,7 @@ N1 <- N*pop.p[1]
 N2 <- N*pop.p[2]
 N3 <- N*pop.p[3]
 
-#distribute GC cases to have overall 2.8% prevalence
+#distribute GC cases to have overall 3% prevalence
 x <- 0.03/(.3*0.029+.6*0.154+.1*0.817)
 
 gc_lo <- round(N1*x*0.029,0)
@@ -71,6 +72,7 @@ gc_md <- round(N2*x*0.154,0)
 gc_hi <- round(N3*x*0.817,0)
 
 #estimated proportion of symp. infections at cross-sectional point in time, @ equilibrium
+# estimated from calibration_ER script
 prev_symp <- 0.10
 Y_gc_lo <- gc_lo*prev_symp
 Z_gc_lo <- gc_lo*(1-prev_symp)
@@ -534,10 +536,10 @@ gradual.SI <- function(t, x, parms){
         beta <- beta * b #contacts * transmission pr per partnership
         
         # Function will transition between 0 and 0.5 when h and Q are approximately equal
-        smooth.transition3 <- function(t, Q, tune = 0.3){
+        smooth.transition3 <- function(t, Q, tune = 0.22){
   sigmoid((t/Q -1)/tune)/2
 }
-        smooth.transition4 <- function(t, Q, tune = 0.3){
+        smooth.transition4 <- function(t, Q, tune = 0.22){
   1-sigmoid((t/Q - 1)/tune)/2
 }
         Q <- 365*4 #can play around and make this midpoint shorter/longer

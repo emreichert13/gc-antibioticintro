@@ -1,3 +1,7 @@
+## Script of common functions needed for "Resistance-minimizing strategies for 
+## introducing a novel antibiotic for gonorrhea treatment: a mathematical modeling study
+
+# E Reichert, 04.2022
 
 # clean output of ODE solver into long format
 SI.clean <- function(data){
