@@ -38,8 +38,10 @@ N1 <- N*pop.p[1]
 N2 <- N*pop.p[2]
 N3 <- N*pop.p[3]
 
+prev_target <- 0.03 #Can Update to desired GC prevalence target 
+
 #distribute GC cases to have overall 3% prevalence
-x <- 0.03/(.3*0.029+.6*0.154+.1*0.817)
+x <- prev_target/(.3*0.029+.6*0.154+.1*0.817)
 
 gc_lo <- round(N1*x*0.029,0)
 gc_md <- round(N2*x*0.154,0)
@@ -109,7 +111,7 @@ model.epi.loglik <- function(theta) {
   params <-list(c_min = c_min, epsilon = epsilon, sigma = sigma, b=b,Ts = Ts,Tm = Tm, g = g, Tsr = Ts/3)
   pred <- pred_fun_er(params)
   beta.params.prev <- estBetaParams(mu = pred, var = 1.47e-5)
-  ll <- sum(dbeta(x= 0.03, beta.params.prev$alpha, beta.params.prev$beta, log=TRUE)) #calculate likelihood
+  ll <- sum(dbeta(x= prev_target, beta.params.prev$alpha, beta.params.prev$beta, log=TRUE)) #calculate likelihood
   ll[is.na(ll)]<-(-1e20)
   print(ll)
   c(prev=pred,ll=ll)
@@ -168,7 +170,7 @@ N2 <- N*pop.p[2]
 N3 <- N*pop.p[3]
 
 #distribute GC cases to have overall 3% prevalence
-x <- 0.03/(.3*0.029+.6*0.154+.1*0.817)
+x <- prev_target/(.3*0.029+.6*0.154+.1*0.817)
 
 gc_lo <- round(N1*x*0.029,0)
 gc_md <- round(N2*x*0.154,0)
@@ -235,8 +237,8 @@ hist(calibration_sim$prev_GC)
 ######## APPENDIX -- explore params for prevalence distribution
 #define range
 p = seq(0, 0.10, length=100)
-#create plot of Beta distribution with shape parameters 2 and 10
-vars <- estBetaParams(mu = 0.03, var = 1.47e-6)
+#create plot of Beta distribution
+vars <- estBetaParams(mu = prev_target, var = 1.47e-5)
 plot(p, dbeta(p, vars$alpha, vars$beta), type='l')
 plot(p, pbeta(p, vars$alpha, vars$beta), type='l')
 
